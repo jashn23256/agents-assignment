@@ -1,48 +1,47 @@
 # LiveKit Intelligent Interruption Agent ("Kelly")
 
-This repository contains a LiveKit Voice Agent customized to handle "Intelligent Interruptions." The primary goal is to solve the "Backchannel Problem"—where users saying "Yeah," "Okay," or "Uh-huh" accidentally cut off the agent mid-sentence.
+This repository contains a LiveKit Voice Agent customized to handle "Intelligent Interruptions." The goal is to solve the "Backchannel Problem"—where users saying "Yeah," "Okay," or "Uh-huh" accidentally trigger a full interruption, causing the agent to stop speaking and regenerate its thought process.
 
-##  The Logic Core
+## ⚠️ The Core Challenge (Technical Constraints)
 
-The agent uses a **Hybrid VAD + Semantic Brain** approach to decide when to stop speaking.
+In modern versions of the LiveKit Agents framework, direct access to the low-level `VoicePipelineAgent` or the raw VAD audio loop has been abstracted away. This means we cannot easily inject logic *inside* the VAD to conditionally suppress "Stop" signals based on audio features.
 
-### 1. The VAD "Safety Net" (Time-Based)
-The first line of defense is the Voice Activity Detector (VAD) configuration.
-- **Logic:** We set `min_interruption_duration` to a high threshold (e.g., `2.0s`).
-- **Effect:** The hardware VAD is effectively "blind" to short utterances. If a user says anything short (like "Stop" or "Okay"), the agent **never** pauses automatically. This guarantees zero audio "hiccups."
+**The Dilemma:**
+1.  **Strict VAD:** If we allow standard interruptions, "Okay" cuts the audio immediately.
+2.  **No VAD:** If we disable interruptions entirely, the user cannot stop the agent at all.
+3.  **The Latency Trade-off:** To distinguish between "Okay" and "Stop," we **must** wait for the Speech-to-Text (STT) transcript. This inevitably introduces a slight latency (the "VAD wait time") because the system cannot know *what* was said until the user finishes saying it.
 
-### 2. The Semantic Brain (Meaning-Based)
-Since the VAD ignores everything, we rely on the Speech-to-Text (STT) transcript to manually control the conversation flow.
+## 🧠 The Solution: Semantic Filtering Layer
 
-**The Decision Matrix:**
-Every time the user finishes speaking, the `my_custom_turn_completed` function runs:
+We implemented a logic layer that sits **between the Transcription (STT) and the Intelligence (LLM)**.
 
-1.  **Check 1: Exact Match**
-    * Is the word exactly in our `IGNORE_WORDS` list? (e.g., "yeah", "ok", "sure").
-    * *Result:* If **YES**, the agent ignores it completely and keeps talking.
+### 1. VAD Configuration (The 0.5s Rule)
+We rely on a standard `min_interruption_duration` of `0.5` seconds.
+* **Logic:** Any noise shorter than 0.5s is ignored by the hardware automatically.
+* **Effect:** Determining if an utterance is speech vs. noise happens here. Once it crosses 0.5s, it is sent to our semantic filter.
 
-2.  **Check 2: Semantic Similarity (Embeddings)**
-    * We use `SentenceTransformer` ('all-MiniLM-L6-v2') to vectorize the user's input.
-    * We compare it against the embeddings of our ignore list using **Cosine Similarity**.
-    * *Result:* If the similarity score is > `0.60`, we treat it as a passive acknowledgement ("Backchanneling") and ignore it.
+### 2. The Semantic Filter (The "Brain Guard")
+Since we cannot block the VAD signal at the hardware level without losing "Stop" functionality, we allow the signal to pass but **block it from reaching the LLM's context window.**
 
-3.  **Check 3: The "Stop" Command**
-    * If the input is **NOT** an ignore word (e.g., "Stop", "Wait", "Change topic"), the code manually triggers the interruption.
-    * **Action:** It cancels the current LLM task and forces the agent to acknowledge the stop immediately (e.g., "Stopping."), effectively clearing the audio buffer.
+**The Workflow:**
+1.  **User Speaks:** "Yeah, sure."
+2.  **Transcription:** The STT engine converts audio to text.
+3.  **Embedding Check:**
+    * We generate vector embeddings for the input using `SentenceTransformer`.
+    * We compare these against a pre-computed list of "Passive Words" (e.g., *yeah, uh-huh, ok, right*).
+4.  **The Fork:**
+    * **Case A (Similarity > 0.60):** The input is classified as "Backchanneling."
+        * **Action:** We **prevent** the input from reaching the LLM. The agent's current speech stream is maintained (or resumed immediately), and the agent *does not* reconsider its thought process. It effectively "hears" you but ignores the interruption.
+    * **Case B (No Similarity):** The input is a valid command (e.g., "Stop," "Wait," "Change topic").
+        * **Action:** We manually trigger a `StopResponse`, clear the audio buffer, and allow the LLM to generate a new reply.
 
-### 3. State Awareness
-* **Agent Speaking:** The logic above applies. Passive words are ignored; commands stop the agent.
-* **Agent Silent:** No special logic is applied. If the user says "Yeah" while the agent is listening, the agent treats it as a normal conversational turn (e.g., "Glad you agree!").
-
----
-
-##  Setup & Installation
+## 🚀 Setup & Installation
 
 ### 1. Prerequisites
 * Python 3.9+
-* A LiveKit Cloud Project (or local instance)
-* API Keys for Groq (LLM/STT) and Murf (TTS)
+* LiveKit Cloud Project
+* API Keys: Groq (LLM/STT), Murf (TTS)
 
-### 2. Install Dependencies
+### 2. Installation
 ```bash
 pip install -r requirements.txt
